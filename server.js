@@ -79,6 +79,8 @@ async function refreshLeaderboard() {
     }).filter(Boolean);
   });
 
+  await page.goto('about:blank').catch(() => {});
+
   const byGamertag = new Map();
   for (const row of rows) {
     byGamertag.set(row.gamertag.toLowerCase(), row);
