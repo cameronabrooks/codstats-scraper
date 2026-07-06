@@ -326,7 +326,7 @@ async function withBrowserOp(fn) {
 }
 
 async function scrapeBracketInner(page, division) {
-  await page.goto(LEAGUE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.goto(LEAGUE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
   // Click the division tab
   await page.waitForFunction(
     (text) => Array.from(document.querySelectorAll('[role="tab"], button')).some(el => el.textContent.trim().startsWith(text)),
