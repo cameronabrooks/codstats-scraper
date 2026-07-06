@@ -445,11 +445,6 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/bracket') {
-    if (!checkAuth(req)) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
-      return;
-    }
     try {
       const data = await withBrowserOp(() => scrapeAllBracketsInner());
       res.writeHead(200, { 'Content-Type': 'application/json' });
