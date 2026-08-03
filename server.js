@@ -436,6 +436,119 @@ async function scrapeAllBracketsInner() {
   return results;
 }
 
+const REGULAR_SEASON_DIVISIONS = ['Academy Mini SZN', 'Premier Mini SZN'];
+
+async function scrapeRegularSeasonInner(page, division) {
+  await page.goto(LEAGUE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+
+  // Click the division tab
+  await page.waitForFunction(
+    (text) => Array.from(document.querySelectorAll('[role="tab"], button')).some(el => el.textContent.trim().startsWith(text)),
+    { timeout: 15000 },
+    division
+  );
+  const divHandle = await page.evaluateHandle((text) => {
+    return Array.from(document.querySelectorAll('[role="tab"], button')).find(el => el.textContent.trim().startsWith(text)) || null;
+  }, division);
+  const divEl = divHandle.asElement();
+  if (!divEl) { await divHandle.dispose(); throw new Error(`Tab not found: ${division}`); }
+  await divEl.click();
+  await divHandle.dispose();
+
+  // Click Regular Season tab
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('[role="tab"], button')).some(el => el.textContent.trim().startsWith('Regular Season')),
+    { timeout: 15000 }
+  );
+  const rsHandle = await page.evaluateHandle(() => {
+    return Array.from(document.querySelectorAll('[role="tab"], button')).find(el => el.textContent.trim().startsWith('Regular Season')) || null;
+  });
+  const rsEl = rsHandle.asElement();
+  if (!rsEl) { await rsHandle.dispose(); throw new Error('Regular Season tab not found'); }
+  await rsEl.click();
+  await rsHandle.dispose();
+
+  await page.waitForFunction(
+    () => document.body.innerText.includes('Week') || document.body.innerText.includes('WEEK'),
+    { timeout: 20000 }
+  );
+  return await page.evaluate(() => document.body.innerText);
+}
+
+function parseRegularSeasonText(text, divisionLabel) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const weeks = {};
+  let currentWeek = null;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    // Detect week headers like "Week 1", "WEEK 1", "Week 1:", etc.
+    const weekMatch = line.match(/^week\s+(\d+)/i);
+    if (weekMatch) {
+      currentWeek = parseInt(weekMatch[1], 10);
+      if (!weeks[currentWeek]) weeks[currentWeek] = [];
+      i++;
+      continue;
+    }
+
+    if (!currentWeek) { i++; continue; }
+
+    // Try to read a match: TeamA VS TeamB letter
+    // Teams may be preceded by a seed like #1
+    function peekTeam(idx) {
+      if (/^#\d+$/.test(lines[idx])) {
+        return { name: lines[idx + 1], consumed: 2 };
+      }
+      if (lines[idx] && lines[idx] !== 'VS' && !lines[idx].match(/^week/i)) {
+        return { name: lines[idx], consumed: 1 };
+      }
+      return null;
+    }
+
+    const teamAResult = peekTeam(i);
+    if (!teamAResult) { i++; continue; }
+    const afterA = i + teamAResult.consumed;
+    if (lines[afterA] !== 'VS') { i++; continue; }
+    const teamBResult = peekTeam(afterA + 1);
+    if (!teamBResult) { i++; continue; }
+    const afterB = afterA + 1 + teamBResult.consumed;
+    const letter = lines[afterB] || null;
+
+    weeks[currentWeek].push({
+      division: divisionLabel,
+      week: currentWeek,
+      teamAName: teamAResult.name,
+      teamBName: teamBResult.name,
+      letter: letter || `${divisionLabel.slice(0,1)}${currentWeek}-${weeks[currentWeek].length + 1}`,
+    });
+    i = afterB + 1;
+  }
+
+  return weeks;
+}
+
+async function scrapeAllRegularSeasonInner() {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1400, height: 1000 });
+  const results = {};
+  try {
+    for (const division of REGULAR_SEASON_DIVISIONS) {
+      try {
+        const text = await scrapeRegularSeasonInner(page, division);
+        results[division] = parseRegularSeasonText(text, division);
+      } catch (e) {
+        console.error(`regularSeasonScrape: failed for ${division}: ${e.message}`);
+        results[division] = {};
+      }
+    }
+  } finally {
+    await page.close();
+  }
+  return results;
+}
+
 function checkAuth(req) {
   if (!AUTH_TOKEN) return true;
   const provided = req.headers['authorization']?.replace(/^Bearer\s+/i, '');
@@ -448,6 +561,18 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (url.pathname === '/regular-season') {
+    try {
+      const data = await withBrowserOp(() => scrapeAllRegularSeasonInner());
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 
