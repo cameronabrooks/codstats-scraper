@@ -572,6 +572,25 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === '/regular-season-raw') {
+    try {
+      const division = url.searchParams.get('division') || 'Academy Mini SZN';
+      const text = await withBrowserOp(async () => {
+        const browser = await getBrowser();
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1400, height: 1000 });
+        try { return await scrapeRegularSeasonInner(page, division); }
+        finally { await page.close(); }
+      });
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(text);
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end(e.message);
+    }
+    return;
+  }
+
   if (url.pathname === '/bracket') {
     try {
       const data = await withBrowserOp(() => scrapeAllBracketsInner());
