@@ -439,9 +439,10 @@ async function scrapeAllBracketsInner() {
 const REGULAR_SEASON_DIVISIONS = ['Academy Mini SZN', 'Premier Mini SZN'];
 
 async function scrapeRegularSeasonInner(page, division) {
-  await page.goto(LEAGUE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  // Navigate directly to the schedule tab
+  await page.goto(`${LEAGUE_URL}?tab=schedule`, { waitUntil: 'domcontentloaded', timeout: 120000 });
 
-  // Click the division tab
+  // Click the division tab (Academy Mini SZN / Premier Mini SZN)
   await page.waitForFunction(
     (text) => Array.from(document.querySelectorAll('[role="tab"], button')).some(el => el.textContent.trim().startsWith(text)),
     { timeout: 15000 },
@@ -455,36 +456,37 @@ async function scrapeRegularSeasonInner(page, division) {
   await divEl.click();
   await divHandle.dispose();
 
-  // Click Regular Season tab
   await page.waitForFunction(
-    () => Array.from(document.querySelectorAll('[role="tab"], button')).some(el => el.textContent.trim().startsWith('Regular Season')),
-    { timeout: 15000 }
-  );
-  const rsHandle = await page.evaluateHandle(() => {
-    return Array.from(document.querySelectorAll('[role="tab"], button')).find(el => el.textContent.trim().startsWith('Regular Season')) || null;
-  });
-  const rsEl = rsHandle.asElement();
-  if (!rsEl) { await rsHandle.dispose(); throw new Error('Regular Season tab not found'); }
-  await rsEl.click();
-  await rsHandle.dispose();
-
-  await page.waitForFunction(
-    () => document.body.innerText.includes('Week') || document.body.innerText.includes('WEEK'),
+    () => document.body.innerText.includes('WEEK') || document.body.innerText.includes('Week'),
     { timeout: 20000 }
   );
   return await page.evaluate(() => document.body.innerText);
 }
 
+// Actual page text format per match:
+//   WEEK 1
+//   TBD
+//   Regular
+//   Lexington Majestic
+//   LEX          ← 2-4 char abbreviation
+//   VS
+//   Montreal Red Dragons
+//   MRD          ← 2-4 char abbreviation
+//   GStake
+//   Preview
 function parseRegularSeasonText(text, divisionLabel) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const weeks = {};
   let currentWeek = null;
   let i = 0;
 
+  const isAbbrev = s => /^[A-Z]{2,5}$/.test(s);
+  const isSkip = s => ['GStake', 'Preview', 'TBD', 'Regular', 'Confirmed'].includes(s) || /^\d{1,2}\/\d{1,2}/.test(s);
+
   while (i < lines.length) {
     const line = lines[i];
-    // Detect week headers like "Week 1", "WEEK 1", "Week 1:", etc.
-    const weekMatch = line.match(/^week\s+(\d+)/i);
+
+    const weekMatch = line.match(/^WEEK\s+(\d+)$/i);
     if (weekMatch) {
       currentWeek = parseInt(weekMatch[1], 10);
       if (!weeks[currentWeek]) weeks[currentWeek] = [];
@@ -492,37 +494,31 @@ function parseRegularSeasonText(text, divisionLabel) {
       continue;
     }
 
-    if (!currentWeek) { i++; continue; }
+    if (!currentWeek || isSkip(line) || isAbbrev(line)) { i++; continue; }
 
-    // Try to read a match: TeamA VS TeamB letter
-    // Teams may be preceded by a seed like #1
-    function peekTeam(idx) {
-      if (/^#\d+$/.test(lines[idx])) {
-        return { name: lines[idx + 1], consumed: 2 };
-      }
-      if (lines[idx] && lines[idx] !== 'VS' && !lines[idx].match(/^week/i)) {
-        return { name: lines[idx], consumed: 1 };
-      }
-      return null;
-    }
+    // Expect: TeamA name, TeamA abbrev, VS, TeamB name, TeamB abbrev
+    const teamAName = line;
+    const afterAName = i + 1;
+    if (!isAbbrev(lines[afterAName])) { i++; continue; }
+    const afterAAbbrev = afterAName + 1;
+    if (lines[afterAAbbrev] !== 'VS') { i++; continue; }
+    const teamBName = lines[afterAAbbrev + 1];
+    if (!teamBName || isSkip(teamBName) || teamBName === 'VS') { i++; continue; }
+    const afterBName = afterAAbbrev + 2;
+    if (!isAbbrev(lines[afterBName])) { i++; continue; }
 
-    const teamAResult = peekTeam(i);
-    if (!teamAResult) { i++; continue; }
-    const afterA = i + teamAResult.consumed;
-    if (lines[afterA] !== 'VS') { i++; continue; }
-    const teamBResult = peekTeam(afterA + 1);
-    if (!teamBResult) { i++; continue; }
-    const afterB = afterA + 1 + teamBResult.consumed;
-    const letter = lines[afterB] || null;
+    const abbrevA = lines[afterAName];
+    const abbrevB = lines[afterBName];
+    const letter = `${abbrevA}v${abbrevB}-W${currentWeek}`;
 
     weeks[currentWeek].push({
       division: divisionLabel,
       week: currentWeek,
-      teamAName: teamAResult.name,
-      teamBName: teamBResult.name,
-      letter: letter || `${divisionLabel.slice(0,1)}${currentWeek}-${weeks[currentWeek].length + 1}`,
+      teamAName,
+      teamBName,
+      letter,
     });
-    i = afterB + 1;
+    i = afterBName + 1;
   }
 
   return weeks;
