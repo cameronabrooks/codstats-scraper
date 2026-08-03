@@ -481,7 +481,8 @@ function parseRegularSeasonText(text, divisionLabel) {
   let i = 0;
 
   const isAbbrev = s => /^[A-Z]{2,5}$/.test(s);
-  const isSkip = s => ['GStake', 'Preview', 'TBD', 'Regular', 'Confirmed'].includes(s) || /^\d{1,2}\/\d{1,2}/.test(s);
+  const isRecord = s => /^\(\d+-\d+\)$/.test(s);
+  const isSkip = s => ['GStake', 'Preview', 'TBD', 'Regular', 'Confirmed'].includes(s) || /^\d{1,2}\/\d{1,2}/.test(s) || isRecord(s);
 
   while (i < lines.length) {
     const line = lines[i];
@@ -500,11 +501,13 @@ function parseRegularSeasonText(text, divisionLabel) {
     const teamAName = line;
     const afterAName = i + 1;
     if (!isAbbrev(lines[afterAName])) { i++; continue; }
-    const afterAAbbrev = afterAName + 1;
-    if (lines[afterAAbbrev] !== 'VS') { i++; continue; }
-    const teamBName = lines[afterAAbbrev + 1];
+    // skip optional record like (0-0)
+    let vsIdx = afterAName + 1;
+    if (isRecord(lines[vsIdx])) vsIdx++;
+    if (lines[vsIdx] !== 'VS') { i++; continue; }
+    const teamBName = lines[vsIdx + 1];
     if (!teamBName || isSkip(teamBName) || teamBName === 'VS') { i++; continue; }
-    const afterBName = afterAAbbrev + 2;
+    const afterBName = vsIdx + 2;
     if (!isAbbrev(lines[afterBName])) { i++; continue; }
 
     const abbrevA = lines[afterAName];
