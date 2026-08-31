@@ -10,10 +10,10 @@ const AUTH_TOKEN = process.env.AUTH_TOKEN || null;
 const CS_EMAIL = process.env.CS_EMAIL;
 const CS_PASSWORD = process.env.CS_PASSWORD;
 const LEAGUE_URL = 'https://cod-stats.com/amateur-leagues/average-joes-cod-league';
-const BRACKET_DIVISIONS = ['Season 9 Academy', 'Season 9 Premier'];
+const BRACKET_DIVISIONS = ['Academy Mini SZN', 'Premier Mini SZN'];
 const ROUND_HEADER_RE = /^(WINNERS|LOSERS)\s+(BRACKET|R\d+|SEMIS|FINALS)$|^GRAND FINALS$|^IF NECESSARY$/;
 const LEADERBOARD_TTL_MS = 5 * 60 * 1000;
-const SEASONS = ['Season 9 Academy', 'Season 9 Premier'];
+const SEASONS = ['Academy Mini SZN', 'Premier Mini SZN'];
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 const MAX_REQUESTS_BEFORE_RECYCLE = 25;
 
