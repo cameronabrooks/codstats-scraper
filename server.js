@@ -332,6 +332,37 @@ async function withBrowserOp(fn) {
   });
 }
 
+// Reads a season's public cod-stats player-stats embed (no login needed):
+// https://cod-stats.com/embed/average-joes-cod-league/players?season=<id>
+// Returns { season, headers, rows: [{ player, team, stats: { "K/D": "1.62", ... } }] }.
+const EMBED_PLAYERS_URL = 'https://cod-stats.com/embed/average-joes-cod-league/players';
+async function scrapeEmbedPlayersInner(seasonId) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${EMBED_PLAYERS_URL}?season=${encodeURIComponent(seasonId)}`, { waitUntil: 'networkidle2', timeout: 60000 });
+    // Either the table renders or the "no stats yet" message does.
+    await page.waitForFunction(
+      () => document.querySelector('table tbody tr') || /No player statistics/i.test(document.body.innerText),
+      { timeout: 20000 }
+    ).catch(() => {});
+    return await page.evaluate(() => {
+      const t = document.querySelector('table');
+      if (!t) return { headers: [], rows: [], empty: /No player statistics/i.test(document.body.innerText) };
+      const headers = [...t.querySelectorAll('thead th')].map(th => th.innerText.trim());
+      const rows = [...t.querySelectorAll('tbody tr')].map(tr => {
+        const cells = [...tr.querySelectorAll('td')].map(td => td.innerText.trim().replace(/\s+/g, ' '));
+        const row = {};
+        headers.forEach((h, i) => { if (h) row[h] = cells[i]; });
+        return { player: row.PLAYER || '', team: row.TEAM || '', stats: row };
+      }).filter(r => r.player);
+      return { headers, rows, empty: rows.length === 0 };
+    });
+  } finally {
+    await page.close();
+  }
+}
+
 async function scrapeBracketInner(page, division) {
   await page.goto(LEAGUE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
   // Click the division tab
@@ -595,6 +626,30 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end(e.message);
+    }
+    return;
+  }
+
+  // GET /embed-players?season=<cod-stats season id> -> that season's player stats table
+  if (url.pathname === '/embed-players') {
+    if (!checkAuth(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    const seasonId = url.searchParams.get('season') || '';
+    if (!/^[0-9a-f-]{36}$/i.test(seasonId)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'season must be a cod-stats season id' }));
+      return;
+    }
+    try {
+      const data = await withBrowserOp(() => scrapeEmbedPlayersInner(seasonId));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ season: seasonId, ...data }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
     }
     return;
   }
