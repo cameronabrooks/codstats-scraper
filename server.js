@@ -800,7 +800,9 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
           throw new Error('cod-stats asked to sign in for match stats (login not working)');
         }
         if (debug && !debugText) debugText = text;
-        entry.scorecard = /MATCH SCORECARD/.test(text) ? parseScorecard(text) : null;
+        const parsed = /MATCH SCORECARD/.test(text) ? parseScorecard(text) : null;
+        // Only keep a scorecard that actually has stats (not a half-loaded pop-up).
+        entry.scorecard = parsed && (parsed.overall.length || parsed.maps.length) ? parsed : null;
         if (entry.matchId) seen.add(entry.matchId);
         out.push(entry);
       }
