@@ -585,11 +585,11 @@ async function scrapeAllRegularSeasonInner() {
 }
 
 // ── Match scorecards (signed in) ──────────────────────────────────────────────
-// cod-stats only shows a match's detailed stats (scorecards, per-player numbers)
-// to signed-in users. This reads them the way a person would: open the league's
-// Results tab for one season, click each match's "Stats" button, and copy every
-// table in the pop-up (once per map/tab inside it). Matches with no detailed
-// stats ("No detailed stats tracked") come back with just the score.
+// cod-stats only shows a match's scorecard (series MVP, each team's overall
+// stats, every map) to signed-in users. This reads it the way a person would:
+// open the league's Results tab for one season, click each match's "Stats"
+// button and read the scorecard pop-up. Matches with no detailed stats
+// ("No detailed stats tracked") come back with just the score.
 // GET /match-stats?game=MW4&season=SZN%20X%20Premier[&skip=<id>,<id>][&debug=1]
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -622,22 +622,25 @@ async function waitForText(page, text, timeout = 15000) {
   await page.waitForFunction(t => Array.from(document.querySelectorAll('button, [role="tab"], a')).some(e => e.textContent.trim().startsWith(t)), { timeout }, text).catch(() => {}); // the click after it reports a missing tab
 }
 
-// Result cards on the current Results page: one per match.
+// Result cards on the current Results page: one per match. The page also has a
+// "Stats" menu, so a card is the nearest box around a Stats button that holds a
+// score ("3 / - / 0") and no other Stats button.
 async function readResultCards(page) {
   return safeEval(page, () => {
-    const statsButtons = Array.from(document.querySelectorAll('main button')).filter(b => b.textContent.trim() === 'Stats');
-    return statsButtons.map((btn, index) => {
-      // The card is the biggest ancestor that holds only this one Stats button.
-      let card = btn;
-      while (card.parentElement && card.parentElement.tagName !== 'MAIN' &&
-        Array.from(card.parentElement.querySelectorAll('button')).filter(b => b.textContent.trim() === 'Stats').length === 1) card = card.parentElement;
-      const lines = card.innerText.split('\n').map(s => s.trim()).filter(Boolean);
-      return { index, lines, noStats: /No detailed stats tracked/i.test(card.innerText) };
+    const all = Array.from(document.querySelectorAll('main button')).filter(b => b.textContent.trim() === 'Stats');
+    const cards = [];
+    all.forEach((btn, index) => {
+      let box = btn;
+      while (box.parentElement && box.tagName !== 'MAIN' && !/\n-\n/.test(box.innerText)) box = box.parentElement;
+      if (box.tagName === 'MAIN') return;
+      if (Array.from(box.querySelectorAll('button')).filter(b => b.textContent.trim() === 'Stats').length !== 1) return;
+      cards.push({ index, lines: box.innerText.split('\n').map(s => s.trim()).filter(Boolean), noStats: /No detailed stats tracked/i.test(box.innerText) });
     });
+    return cards;
   });
 }
 
-// "Aug 16 | 10:00 PM | Regular | BO5 | Online | Kansas City Kings | KCK | 1 | - | 3 | Dominant | Manhattan Mafia | MAN | Stats ..."
+// "Nov 24 | • | 10:15 PM ET | Regular | BO5 | Online | Montreal Red Dragons | MRD | 3 | - | 0 | Sweep | Kansas City Kings | KCK | Stats ..."
 function parseCard(lines) {
   const dash = lines.indexOf('-');
   if (dash < 3) return null;
@@ -646,38 +649,84 @@ function parseCard(lines) {
   let j = dash + 2;
   if (!/^[A-Z0-9]{2,5}$/.test(lines[j + 1] || '')) j++; // skip "Sweep" / "Close" / "Dominant"
   const nameB = lines[j], abbrB = lines[j + 1];
-  const head = lines.slice(0, Math.max(0, dash - 3));
-  const date = head[0] && !/^Date N\/A$/i.test(head[0]) ? head.slice(0, 2).join(' ').replace(/•/g, ' ').trim() : null;
+  const head = lines.slice(0, Math.max(0, dash - 3)).filter(s => s !== '•');
+  const date = head[0] && !/^Date N\/A$/i.test(head[0]) ? head.slice(0, 2).join(' ').replace(/•/g, ' ').replace(/\s+/g, ' ').trim() : null;
   const stage = head.find(s => /^(Regular|Playoff)$/i.test(s)) || null;
   const format = head.find(s => /^BO\d$/i.test(s)) || null;
   return { date, stage, format, teamA: { name: nameA, abbr: abbrA, score: scoreA }, teamB: { name: nameB, abbr: abbrB, score: scoreB } };
 }
 
-// Every table (and its nearest heading) inside the open match pop-up.
-async function readDialogTables(page) {
-  return safeEval(page, () => {
-    const dlg = Array.from(document.querySelectorAll('[role="dialog"]')).find(d => !/Opt out of the sale/i.test(d.innerText));
-    if (!dlg) return null;
-    const headingFor = el => {
-      let n = el;
-      for (let k = 0; k < 6 && n; k++) {
-        let p = n.previousElementSibling;
-        while (p) {
-          const h = p.matches('h1,h2,h3,h4,h5,h6,[class*="title"],[class*="header"]') ? p : p.querySelector && p.querySelector('h1,h2,h3,h4,h5,h6');
-          if (h && h.innerText.trim()) return h.innerText.trim().split('\n')[0].slice(0, 80);
-          p = p.previousElementSibling;
-        }
-        n = n.parentElement;
+// Turns the text of cod-stats' match scorecard pop-up into data:
+// { teamA, teamB, scoreA, scoreB, mvp, overall: [team], maps: [{ num, map, mode, scoreA, scoreB, teams: [team] }] }
+// team = { team (abbreviation), kd, headers: [...], rows: [[player, ...values]], total: [...] }
+const SC_COLUMNS = new Set(['K', 'D', 'K/D', 'KD', 'DMG', 'HILL', 'FB', 'P', 'A', 'CAP', 'CAPS', 'DEF', 'OBJ', 'TIME', 'PL', 'DF', 'ASSISTS', 'KILLS', 'DEATHS']);
+// The last "P" / "D" columns are bomb plants and defuses.
+function scHeaders(cols) {
+  const out = cols.slice();
+  const p = out.lastIndexOf('P');
+  if (p >= 0) { out[p] = 'PLANTS'; if (out[p + 1] === 'D') out[p + 1] = 'DEFUSES'; }
+  return out;
+}
+function parseScorecard(text) {
+  const raw = String(text || '').split('\n');
+  const L = raw.map(s => s.trim()).filter(Boolean);
+  const at = (s, from = 0) => L.indexOf(s, from);
+  const out = { teamA: null, teamB: null, scoreA: null, scoreB: null, mvp: null, overall: [], maps: [] };
+  const ms = at('MATCH SCORECARD');
+  if (ms >= 2) {
+    out.teamA = L[ms - 2]; out.teamB = L[ms + 1];
+    const sc = /^(\d+)\s*-\s*(\d+)$/.exec(L[ms - 1] || '');
+    if (sc) { out.scoreA = +sc[1]; out.scoreB = +sc[2]; }
+  }
+  const mvp = at('SERIES MVP');
+  if (mvp >= 0 && L[mvp + 4] === 'kills') out.mvp = { name: L[mvp + 1], team: L[mvp + 2], kills: L[mvp + 3], deaths: L[mvp + 5], kd: L[mvp + 7] };
+
+  // Overall scorecard: real tables (tab-separated lines).
+  const ov = at('Overall Scorecard');
+  let i = ov >= 0 ? ov + 1 : L.length;
+  const isMapHead = k => /^M\d+$/.test(L[k] || '') && L[k + 3] && /^\d+$/.test(L[k + 3]) && L[k + 4] === '-';
+  while (i < L.length && !isMapHead(i)) {
+    if (L[i] === 'Series K/D:') {
+      const team = { team: L[i - 1], kd: L[i + 1], headers: [], rows: [], total: null };
+      let k = i + 2;
+      if (/^PLAYER\t/.test(L[k])) { team.headers = scHeaders(L[k].split('\t').slice(1)); k++; }
+      while (k < L.length && !/^TOTAL\t/.test(L[k]) && L[k] !== 'Series K/D:' && !isMapHead(k)) {
+        const vals = (L[k + 1] || '').split('\t');
+        if (vals.length > 1) { team.rows.push([L[k], ...vals]); k += 2; } else k++;
       }
-      return '';
-    };
-    const tables = Array.from(dlg.querySelectorAll('table')).map(t => {
-      const headers = Array.from(t.querySelectorAll('thead th')).map(th => th.innerText.trim().replace(/\s+/g, ' '));
-      const rows = Array.from(t.querySelectorAll('tbody tr')).map(tr => Array.from(tr.querySelectorAll('td,th')).map(td => td.innerText.trim().replace(/\s+/g, ' '))).filter(r => r.some(Boolean));
-      return { title: headingFor(t), headers, rows };
-    }).filter(t => t.rows.length);
-    return { title: (dlg.querySelector('h1,h2,h3') || {}).innerText || '', tables, text: dlg.innerText.slice(0, 4000) };
-  });
+      if (/^TOTAL\t/.test(L[k] || '')) { team.total = L[k].split('\t').slice(1); k++; }
+      out.overall.push(team);
+      i = k;
+      continue;
+    }
+    i++;
+  }
+
+  // Maps: "M1 / map / MODE / 250 / - / 16", then each team's block.
+  while (i < L.length) {
+    if (!isMapHead(i)) { i++; continue; }
+    const map = { num: +L[i].slice(1), map: L[i + 1], mode: L[i + 2], scoreA: +L[i + 3], scoreB: +L[i + 5], teams: [] };
+    let k = i + 6;
+    while (k < L.length && !isMapHead(k) && L[k] !== 'Close') {
+      if (L[k + 1] !== 'Team K/D:') { k++; continue; }
+      const team = { team: L[k], kd: L[k + 2], headers: [], rows: [] };
+      let j = k + 3;
+      if (L[j] === 'PLAYER') j++;
+      // Where this block ends: the next team, the next map, or the end.
+      let end = j;
+      while (end < L.length && L[end] !== 'Close' && !isMapHead(end) && L[end + 1] !== 'Team K/D:') end++;
+      let c = 0;
+      while (j + c < end && SC_COLUMNS.has(L[j + c])) c++;
+      while (c > 0 && (end - j - c) % (c + 1) !== 0) c--; // a player named like a column
+      team.headers = scHeaders(L.slice(j, j + c));
+      for (let r = j + c; r + c < end + 1 && c; r += c + 1) team.rows.push(L.slice(r, r + c + 1));
+      map.teams.push(team);
+      k = end;
+    }
+    out.maps.push(map);
+    i = k;
+  }
+  return out;
 }
 
 async function scrapeMatchStatsInner({ game, season, skip, debug }) {
@@ -700,13 +749,13 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
 
   const out = [];
   const seen = new Set();
-  let debugDialog = null;
+  let debugText = null;
   for (let pageNo = 0; pageNo < 20; pageNo++) {
     const cards = await readResultCards(page);
     for (const card of cards) {
       const info = parseCard(card.lines);
       if (!info) continue;
-      const entry = { ...info, matchId: null, hasStats: !card.noStats, views: [] };
+      const entry = { ...info, matchId: null, hasStats: !card.noStats, scorecard: null };
       if (card.noStats) { out.push(entry); continue; }
       // Open the pop-up: the URL gets ?match=<id>.
       await safeEval(page, i => {
@@ -716,48 +765,30 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
       await page.waitForFunction(() => /[?&]match=/.test(location.search), { timeout: 10000 }).catch(() => {});
       entry.matchId = new URL(page.url()).searchParams.get('match');
       if (entry.matchId && (seen.has(entry.matchId) || skip.has(entry.matchId))) {
-        entry.skipped = true; out.push(entry);
-        await page.keyboard.press('Escape'); await sleep(600);
-        continue;
-      }
-      await page.waitForFunction(() => {
-        const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
-        return d && (d.querySelector('table') || /Require Login/i.test(d.innerText));
-      }, { timeout: 15000 }).catch(() => {});
-      const first = await readDialogTables(page);
-      if (first && /Require Login/i.test(first.text)) {
-        await page.keyboard.press('Escape');
-        throw new Error('cod-stats asked to sign in for match stats (login not working)');
-      }
-      if (debug && !debugDialog && first) debugDialog = first.text;
-      // Tabs inside the pop-up (overall / each map): read the tables under each.
-      const tabs = await safeEval(page, () => {
-        const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
-        return d ? Array.from(d.querySelectorAll('[role="tab"]')).map(t => t.textContent.trim()).filter(Boolean) : [];
-      });
-      if (tabs.length > 1) {
-        for (let t = 0; t < tabs.length; t++) {
-          await safeEval(page, t => {
-            const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
-            const el = d && d.querySelectorAll('[role="tab"]')[t];
-            if (el) el.click();
-          }, t);
-          await sleep(1200);
-          const v = await readDialogTables(page);
-          if (v && v.tables.length) entry.views.push({ label: tabs[t], tables: v.tables });
+        entry.skipped = true;
+        out.push(entry);
+      } else {
+        await page.waitForFunction(() => {
+          const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
+          return d && /MATCH SCORECARD|Require Login/i.test(d.innerText);
+        }, { timeout: 15000 }).catch(() => {});
+        await sleep(800);
+        const text = await safeEval(page, () => {
+          const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
+          return d ? d.innerText : '';
+        });
+        if (/Require Login/i.test(text)) {
+          await page.keyboard.press('Escape');
+          throw new Error('cod-stats asked to sign in for match stats (login not working)');
         }
-      } else if (first) {
-        entry.views.push({ label: 'Match', tables: first.tables });
+        if (debug && !debugText) debugText = text;
+        entry.scorecard = /MATCH SCORECARD/.test(text) ? parseScorecard(text) : null;
+        if (entry.matchId) seen.add(entry.matchId);
+        out.push(entry);
       }
-      if (entry.matchId) seen.add(entry.matchId);
-      out.push(entry);
-      await page.keyboard.press('Escape');
-      await sleep(800);
-      // Some pop-ups ignore Escape: drop the ?match= by going back.
-      if (/[?&]match=/.test(new URL(page.url()).search)) {
-        await clickByText(page, 'Close', { exact: true, within: '[role="dialog"]' }).catch(() => {});
-        await sleep(600);
-      }
+      // Close the pop-up.
+      if (!await clickByText(page, 'Close', { exact: true, within: '[role="dialog"]' }).catch(() => false)) await page.keyboard.press('Escape');
+      await sleep(900);
     }
     const moved = await safeEval(page, () => {
       const next = Array.from(document.querySelectorAll('main button')).find(b => b.textContent.trim() === 'Next');
@@ -768,7 +799,7 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
     await sleep(2200);
   }
   await page.goto('about:blank').catch(() => {});
-  return { game, season, signedIn, matches: out, ...(debug ? { debugDialog } : {}) };
+  return { game, season, signedIn, matches: out, ...(debug ? { debugText } : {}) };
 }
 
 function checkAuth(req) {
