@@ -740,12 +740,21 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
     await sleep(1500);
   }
   const signedIn = await safeEval(page, () => !Array.from(document.querySelectorAll('a, button')).some(e => /^(Login|Sign In)$/i.test(e.textContent.trim())));
-  if (game) { await waitForText(page, game); await clickByText(page, game, { exact: true }); await sleep(2500); }
+  const clicks = {};
+  if (game) { await waitForText(page, game); clicks.game = await clickByText(page, game, { exact: true }); await sleep(2500); }
   await waitForText(page, season);
   if (!await clickByText(page, season)) throw new Error(`Season tab not found: ${season}`);
   await sleep(2500);
-  await clickByText(page, 'Results', { exact: true });
+  clicks.results = await clickByText(page, 'Results', { exact: true });
   await sleep(3000);
+  // What the page shows (returned with debug=1, or when no matches are found).
+  const pageInfo = await safeEval(page, () => {
+    const main = document.querySelector('main');
+    const stats = Array.from(document.querySelectorAll('main button')).filter(b => b.textContent.trim() === 'Stats').length;
+    const t = main ? main.innerText : '';
+    const i = t.indexOf('Recent Results');
+    return { url: location.href, statsButtons: stats, text: (i >= 0 ? t.slice(i, i + 1500) : t.slice(0, 1500)) };
+  });
 
   const out = [];
   const seen = new Set();
@@ -799,7 +808,7 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
     await sleep(2200);
   }
   await page.goto('about:blank').catch(() => {});
-  return { game, season, signedIn, matches: out, ...(debug ? { debugText } : {}) };
+  return { game, season, signedIn, matches: out, ...(debug || !out.length ? { clicks, pageInfo, debugText } : {}) };
 }
 
 function checkAuth(req) {
