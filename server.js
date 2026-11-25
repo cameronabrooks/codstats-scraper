@@ -785,9 +785,12 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
       } else {
         await page.waitForFunction(() => {
           const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
-          return d && /MATCH SCORECARD|Require Login/i.test(d.innerText);
-        }, { timeout: 15000 }).catch(() => {});
-        await sleep(800);
+          if (!d) return false;
+          if (/Require Login/i.test(d.innerText)) return true;
+          // The pop-up opens with "Loading match data..." before the scorecard fills in.
+          return /MATCH SCORECARD/.test(d.innerText) && !/Loading match data/i.test(d.innerText) && /Overall Scorecard|SERIES MVP|Team K\/D/i.test(d.innerText);
+        }, { timeout: 30000 }).catch(() => {});
+        await sleep(1200);
         const text = await safeEval(page, () => {
           const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
           return d ? d.innerText : '';
