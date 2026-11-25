@@ -613,6 +613,12 @@ async function clickByText(page, text, { exact = false, within = null } = {}) {
     const el = els.find(e => { const t = e.textContent.trim(); return exact ? t === text : t.startsWith(text); });
     if (!el) return false;
     el.scrollIntoView({ block: 'center' });
+    // cod-stats' tabs switch on mouse-down, so a plain click() isn't enough.
+    const o = { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' };
+    el.dispatchEvent(new PointerEvent('pointerdown', o));
+    el.dispatchEvent(new MouseEvent('mousedown', o));
+    el.dispatchEvent(new PointerEvent('pointerup', o));
+    el.dispatchEvent(new MouseEvent('mouseup', o));
     el.click();
     return true;
   }, text, exact, within);
