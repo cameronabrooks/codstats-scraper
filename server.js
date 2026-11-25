@@ -593,8 +593,20 @@ async function scrapeAllRegularSeasonInner() {
 // GET /match-stats?game=MW4&season=SZN%20X%20Premier[&skip=<id>,<id>][&debug=1]
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// page.evaluate that survives the page reloading underneath it (waits, tries again).
+async function safeEval(page, fn, ...args) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await page.evaluate(fn, ...args); }
+    catch (e) {
+      if (attempt >= 3 || !/Execution context was destroyed|Cannot find context|detached Frame/i.test(e.message || '')) throw e;
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+      await sleep(1500);
+    }
+  }
+}
+
 async function clickByText(page, text, { exact = false, within = null } = {}) {
-  return page.evaluate((text, exact, within) => {
+  return safeEval(page, (text, exact, within) => {
     const root = within ? document.querySelector(within) : document;
     if (!root) return false;
     const els = Array.from(root.querySelectorAll('button, [role="tab"], a'));
@@ -607,12 +619,12 @@ async function clickByText(page, text, { exact = false, within = null } = {}) {
 }
 
 async function waitForText(page, text, timeout = 15000) {
-  await page.waitForFunction(t => Array.from(document.querySelectorAll('button, [role="tab"], a')).some(e => e.textContent.trim().startsWith(t)), { timeout }, text);
+  await page.waitForFunction(t => Array.from(document.querySelectorAll('button, [role="tab"], a')).some(e => e.textContent.trim().startsWith(t)), { timeout }, text).catch(() => {}); // the click after it reports a missing tab
 }
 
 // Result cards on the current Results page: one per match.
 async function readResultCards(page) {
-  return page.evaluate(() => {
+  return safeEval(page, () => {
     const statsButtons = Array.from(document.querySelectorAll('main button')).filter(b => b.textContent.trim() === 'Stats');
     return statsButtons.map((btn, index) => {
       // The card is the biggest ancestor that holds only this one Stats button.
@@ -643,7 +655,7 @@ function parseCard(lines) {
 
 // Every table (and its nearest heading) inside the open match pop-up.
 async function readDialogTables(page) {
-  return page.evaluate(() => {
+  return safeEval(page, () => {
     const dlg = Array.from(document.querySelectorAll('[role="dialog"]')).find(d => !/Opt out of the sale/i.test(d.innerText));
     if (!dlg) return null;
     const headingFor = el => {
@@ -673,8 +685,12 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
   await page.setViewport({ width: 1400, height: 1000 });
   await page.goto(`${LEAGUE_URL}?tab=results`, { waitUntil: 'networkidle2', timeout: 60000 });
   await sleep(1500);
-  await clickByText(page, 'Reject non-essential').catch(() => {});
-  const signedIn = await page.evaluate(() => !Array.from(document.querySelectorAll('a, button')).some(e => /^(Login|Sign In)$/i.test(e.textContent.trim())));
+  // Rejecting cookies reloads the page: wait for that before reading anything.
+  if (await clickByText(page, 'Reject non-essential').catch(() => false)) {
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+    await sleep(1500);
+  }
+  const signedIn = await safeEval(page, () => !Array.from(document.querySelectorAll('a, button')).some(e => /^(Login|Sign In)$/i.test(e.textContent.trim())));
   if (game) { await waitForText(page, game); await clickByText(page, game, { exact: true }); await sleep(2500); }
   await waitForText(page, season);
   if (!await clickByText(page, season)) throw new Error(`Season tab not found: ${season}`);
@@ -693,7 +709,7 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
       const entry = { ...info, matchId: null, hasStats: !card.noStats, views: [] };
       if (card.noStats) { out.push(entry); continue; }
       // Open the pop-up: the URL gets ?match=<id>.
-      await page.evaluate(i => {
+      await safeEval(page, i => {
         const b = Array.from(document.querySelectorAll('main button')).filter(x => x.textContent.trim() === 'Stats')[i];
         if (b) { b.scrollIntoView({ block: 'center' }); b.click(); }
       }, card.index);
@@ -715,13 +731,13 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
       }
       if (debug && !debugDialog && first) debugDialog = first.text;
       // Tabs inside the pop-up (overall / each map): read the tables under each.
-      const tabs = await page.evaluate(() => {
+      const tabs = await safeEval(page, () => {
         const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
         return d ? Array.from(d.querySelectorAll('[role="tab"]')).map(t => t.textContent.trim()).filter(Boolean) : [];
       });
       if (tabs.length > 1) {
         for (let t = 0; t < tabs.length; t++) {
-          await page.evaluate(t => {
+          await safeEval(page, t => {
             const d = Array.from(document.querySelectorAll('[role="dialog"]')).find(x => !/Opt out of the sale/i.test(x.innerText));
             const el = d && d.querySelectorAll('[role="tab"]')[t];
             if (el) el.click();
@@ -743,7 +759,7 @@ async function scrapeMatchStatsInner({ game, season, skip, debug }) {
         await sleep(600);
       }
     }
-    const moved = await page.evaluate(() => {
+    const moved = await safeEval(page, () => {
       const next = Array.from(document.querySelectorAll('main button')).find(b => b.textContent.trim() === 'Next');
       if (!next || next.disabled) return false;
       next.click(); return true;
